@@ -148,52 +148,149 @@ class WildBerriesAPI:
         
         return result
     
-    def check_available_slots(self, sheet_data: Dict[str, Any]) -> Dict[str, Any]:
+    def check_available_slots_optimized(self, all_sheets_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Проверяет доступные слоты для данных из Google таблицы
+        Оптимизированная проверка слотов для всех листов одновременно
         
         Args:
-            sheet_data: Данные листа из parsed_data.json
+            all_sheets_data: Все данные из parsed_data.json
             
         Returns:
-            Dict с результатами мониторинга
+            Dict с результатами мониторинга для всех листов
         """
         result = {
-            'sheet_name': sheet_data.get('name', 'Unknown'),
             'timestamp': datetime.now().isoformat(),
+            'sheets': {},
+            'global_data': {
+                'warehouses': {},
+                'coefficients': {},
+                'all_products_options': {}
+            },
+            'errors': []
+        }
+        
+        sheets = all_sheets_data.get('sheets', {})
+        
+        # 1. Получаем список складов (1 запрос)
+        print("📋 Запрос списка складов...")
+        warehouses_result = self.get_warehouses()
+        if warehouses_result['success']:
+            result['global_data']['warehouses'] = warehouses_result['data']
+            print(f"✅ Получено {len(warehouses_result['data'])} складов")
+        else:
+            result['errors'].append(f"Ошибка получения складов: {warehouses_result['error']}")
+            print(f"❌ Ошибка складов: {warehouses_result['error']}")
+            return result
+        
+        # 2. Получаем коэффициенты приемки (1 запрос)
+        print("📊 Запрос коэффициентов приемки...")
+        coefficients_result = self.get_acceptance_coefficients()
+        if coefficients_result['success']:
+            result['global_data']['coefficients'] = coefficients_result['data']
+            print(f"✅ Получено {len(coefficients_result['data'])} записей коэффициентов")
+        else:
+            result['errors'].append(f"Ошибка получения коэффициентов: {coefficients_result['error']}")
+            print(f"❌ Ошибка коэффициентов: {coefficients_result['error']}")
+        
+        # 3. Собираем все товары из всех листов для одного запроса опций
+        all_products = []
+        product_to_sheet_map = {}  # Маппинг баркод -> название листа
+        
+        for sheet_name, sheet_data in sheets.items():
+            products = sheet_data.get('products', [])
+            for product in products:
+                all_products.append(product)
+                barcode = product['barcode']
+                if barcode not in product_to_sheet_map:
+                    product_to_sheet_map[barcode] = []
+                product_to_sheet_map[barcode].append(sheet_name)
+        
+        # 4. Получаем опции для всех товаров одним запросом (1 запрос)
+        if all_products:
+            print(f"📦 Запрос опций для {len(all_products)} товаров...")
+            options_result = self.get_acceptance_options(all_products)
+            if options_result['success']:
+                result['global_data']['all_products_options'] = options_result['data']
+                print(f"✅ Получены опции для товаров")
+            else:
+                result['errors'].append(f"Ошибка получения опций: {options_result['error']}")
+                print(f"❌ Ошибка опций: {options_result['error']}")
+        else:
+            print("⚠️  Нет товаров для запроса опций")
+        
+        # 5. Обрабатываем результаты для каждого листа
+        for sheet_name, sheet_data in sheets.items():
+            sheet_result = self._process_sheet_data(
+                sheet_name, 
+                sheet_data, 
+                result['global_data'],
+                product_to_sheet_map
+            )
+            result['sheets'][sheet_name] = sheet_result
+        
+        return result
+    
+    def _process_sheet_data(self, sheet_name: str, sheet_data: Dict[str, Any], 
+                           global_data: Dict[str, Any], product_to_sheet_map: Dict[str, List[str]]) -> Dict[str, Any]:
+        """
+        Обрабатывает данные отдельного листа
+        """
+        sheet_result = {
+            'sheet_name': sheet_name,
             'warehouse_ids': {},
             'available_options': {},
-            'coefficients': {},
+            'coefficients': global_data['coefficients'],
             'available_slots': [],
             'errors': []
         }
         
-        # 1. Получаем ID складов по названиям
+        # Получаем ID складов по названиям из глобальных данных
         warehouse_names = sheet_data.get('warehouses', [])
-        warehouse_ids = self.find_warehouse_ids_by_names(warehouse_names)
-        result['warehouse_ids'] = warehouse_ids
+        warehouse_ids = {}
         
-        # 2. Проверяем опции приемки для товаров
-        products = sheet_data.get('products', [])
-        if products:
-            options_result = self.get_acceptance_options(products)
+        print(f"🔍 Поиск складов для листа {sheet_name}: {warehouse_names}")
+        
+        if 'warehouses' in global_data and global_data['warehouses']:
+            warehouses = global_data['warehouses']
+            name_to_id = {}
             
-            if options_result['success']:
-                result['available_options'] = options_result['data']
-            else:
-                result['errors'].append(f"Ошибка получения опций: {options_result['error']}")
-        
-        # 3. Получаем коэффициенты приемки
-        coefficients_result = self.get_acceptance_coefficients()
-        
-        if coefficients_result['success']:
-            result['coefficients'] = coefficients_result['data']
+            for warehouse in warehouses:
+                name_to_id[warehouse['name'].lower()] = warehouse['ID']
             
-            # Фильтруем коэффициенты только для наших складов
+            for name in warehouse_names:
+                found_id = name_to_id.get(name.lower())
+                warehouse_ids[name] = found_id
+                if found_id:
+                    print(f"  ✅ {name} → ID: {found_id}")
+                else:
+                    print(f"  ❌ {name} → не найден")
+        else:
+            print("  ❌ Нет данных о складах в global_data")
+        
+        sheet_result['warehouse_ids'] = warehouse_ids
+        
+        # Извлекаем опции для товаров этого листа
+        sheet_products = sheet_data.get('products', [])
+        sheet_options = {'result': []}
+        
+        if 'all_products_options' in global_data and global_data['all_products_options']:
+            all_options = global_data['all_products_options']
+            
+            # Фильтруем опции только для товаров этого листа
+            sheet_barcodes = {product['barcode'] for product in sheet_products}
+            
+            for option_item in all_options.get('result', []):
+                if option_item.get('barcode') in sheet_barcodes:
+                    sheet_options['result'].append(option_item)
+        
+        sheet_result['available_options'] = sheet_options
+        
+        # Формируем доступные слоты
+        if 'coefficients' in global_data and global_data['coefficients']:
             our_warehouse_ids = [wid for wid in warehouse_ids.values() if wid is not None]
             
             available_slots = []
-            for coef in coefficients_result['data']:
+            for coef in global_data['coefficients']:
                 if (coef['warehouseID'] in our_warehouse_ids and 
                     coef['coefficient'] in [0, 1] and 
                     coef['allowUnload'] is True):
@@ -207,12 +304,9 @@ class WildBerriesAPI:
                         'is_free': coef['coefficient'] == 0
                     })
             
-            result['available_slots'] = available_slots
-            
-        else:
-            result['errors'].append(f"Ошибка получения коэффициентов: {coefficients_result['error']}")
+            sheet_result['available_slots'] = available_slots
         
-        return result
+        return sheet_result
 
 
 class WBMonitor:
@@ -221,7 +315,7 @@ class WBMonitor:
     
     def monitor_parsed_data(self, parsed_data_path: str = 'test/test_output/parsed_data.json') -> Dict[str, Any]:
         """
-        Мониторинг всех листов из parsed_data.json
+        Оптимизированный мониторинг всех листов из parsed_data.json одновременно
         
         Args:
             parsed_data_path: Путь к файлу parsed_data.json
@@ -239,32 +333,32 @@ class WBMonitor:
                 'data': None
             }
         
+        print("🔄 Выполняем оптимизированные API запросы...")
+        
+        # Используем оптимизированный метод (всего 3 API запроса)
+        optimized_results = self.api.check_available_slots_optimized(parsed_data)
+        
+        if optimized_results.get('errors'):
+            return {
+                'success': False,
+                'error': '; '.join(optimized_results['errors']),
+                'data': optimized_results
+            }
+        
+        # Преобразуем результаты в старый формат для совместимости
         monitoring_results = {
             'success': True,
-            'timestamp': datetime.now().isoformat(),
-            'sheets': {},
+            'timestamp': optimized_results['timestamp'],
+            'sheets': optimized_results['sheets'],
             'summary': {
-                'total_sheets': 0,
+                'total_sheets': len(optimized_results['sheets']),
                 'sheets_with_slots': 0,
                 'total_available_slots': 0
             }
         }
         
-        sheets = parsed_data.get('sheets', {})
-        
-        for sheet_name, sheet_data in sheets.items():
-            print(f"Мониторим лист: {sheet_name}")
-            
-            # Добавляем имя листа в данные
-            sheet_data_with_name = sheet_data.copy()
-            sheet_data_with_name['name'] = sheet_name
-            
-            sheet_result = self.api.check_available_slots(sheet_data_with_name)
-            monitoring_results['sheets'][sheet_name] = sheet_result
-            
-            # Обновляем сводку
-            monitoring_results['summary']['total_sheets'] += 1
-            
+        # Подсчитываем сводку
+        for sheet_name, sheet_result in optimized_results['sheets'].items():
             if sheet_result['available_slots']:
                 monitoring_results['summary']['sheets_with_slots'] += 1
                 monitoring_results['summary']['total_available_slots'] += len(sheet_result['available_slots'])

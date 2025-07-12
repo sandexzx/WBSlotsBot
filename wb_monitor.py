@@ -21,6 +21,17 @@ class WBSlotsMonitor:
         self.last_update = None
         self.cycle_count = 0
         
+        # Настройки для оптимизации API запросов
+        self.api_requests_per_minute = 6  # Каждый endpoint имеет свой лимит 6/минуту
+        self.api_pause_between_requests = 4  # начальная пауза между API циклами
+        self.current_api_requests = 0
+        self.parsed_data = None  # Кешируем данные парсинга
+        
+        # Адаптивные тайминги
+        self.minute_start_time = None  # Время начала минутного цикла
+        self.api_execution_times = []  # История времени выполнения API запросов
+        self.target_minute_duration = 60  # Целевая длительность минуты в секундах
+        
     def format_datetime(self, dt_str: str) -> str:
         """Форматирует дату для красивого вывода"""
         try:
@@ -38,6 +49,82 @@ class WBSlotsMonitor:
         self.print_separator()
         print(f" {text}")
         self.print_separator()
+    
+    def calculate_adaptive_pause(self, api_execution_time: float) -> float:
+        """
+        Рассчитывает адаптивную паузу на основе времени выполнения API запросов
+        
+        Args:
+            api_execution_time: Время выполнения последнего API запроса
+            
+        Returns:
+            Рекомендованная пауза в секундах
+        """
+        # Добавляем время последнего запроса в историю
+        self.api_execution_times.append(api_execution_time)
+        
+        # Оставляем только последние 10 измерений для расчета среднего
+        if len(self.api_execution_times) > 10:
+            self.api_execution_times = self.api_execution_times[-10:]
+        
+        # Рассчитываем среднее время выполнения API запроса
+        avg_api_time = sum(self.api_execution_times) / len(self.api_execution_times)
+        
+        # Определяем, сколько API запросов осталось до конца цикла
+        remaining_requests = self.api_requests_per_minute - self.current_api_requests
+        
+        if remaining_requests <= 0:
+            # Если это последний запрос в цикле, возвращаем время до начала новой минуты
+            if self.minute_start_time:
+                elapsed_time = time.time() - self.minute_start_time
+                remaining_time = max(0, self.target_minute_duration - elapsed_time)
+                return remaining_time
+            return self.target_minute_duration
+        
+        # Рассчитываем оставшееся время в минуте
+        if self.minute_start_time:
+            elapsed_time = time.time() - self.minute_start_time
+            remaining_time = max(0, self.target_minute_duration - elapsed_time)
+        else:
+            # Если это первый запрос, считаем что у нас есть вся минута
+            remaining_time = self.target_minute_duration
+        
+        # Вычисляем время, которое потратим на оставшиеся API запросы
+        estimated_api_time = remaining_requests * avg_api_time
+        
+        # Вычисляем общее время на паузы
+        total_pause_time = remaining_time - estimated_api_time
+        
+        # Распределяем паузы равномерно между оставшимися запросами
+        if remaining_requests > 0:
+            adaptive_pause = max(1, total_pause_time / remaining_requests)  # Минимум 1 секунда
+        else:
+            adaptive_pause = self.api_pause_between_requests
+        
+        # Ограничиваем максимальную паузу
+        adaptive_pause = min(adaptive_pause, 30)  # Максимум 30 секунд
+        
+        return adaptive_pause
+    
+    def reset_minute_cycle(self):
+        """Сбрасывает счетчики для нового минутного цикла"""
+        self.minute_start_time = time.time()
+        self.current_api_requests = 0
+        print(f"🔄 Начат новый минутный цикл: {datetime.now().strftime('%H:%M:%S')}")
+    
+    def log_adaptive_timing(self, api_time: float, adaptive_pause: float):
+        """Логирует информацию об адаптивных таймингах"""
+        if len(self.api_execution_times) > 1:
+            avg_api_time = sum(self.api_execution_times) / len(self.api_execution_times)
+            print(f"📊 Среднее время API: {avg_api_time:.2f}с")
+        
+        remaining_requests = self.api_requests_per_minute - self.current_api_requests
+        print(f"⏱️  Адаптивная пауза: {adaptive_pause:.1f}с (осталось {remaining_requests} запросов)")
+        
+        if self.minute_start_time:
+            elapsed_time = time.time() - self.minute_start_time
+            remaining_minute_time = max(0, self.target_minute_duration - elapsed_time)
+            print(f"⏰ Время в текущей минуте: {elapsed_time:.1f}с / {self.target_minute_duration}с (осталось: {remaining_minute_time:.1f}с)")
     
     def display_monitoring_results(self, parsed_data: Dict[str, Any], monitoring_results: Dict[str, Any]):
         """Выводит результаты мониторинга в консоль"""
@@ -206,42 +293,66 @@ class WBSlotsMonitor:
             
             print("-" * 60)  # Разделитель между товарами
     
-    def run_monitoring_cycle(self) -> Dict[str, Any]:
-        """Выполняет один цикл мониторинга"""
-        cycle_start_time = time.time()
+    def run_parsing_cycle(self) -> Dict[str, Any]:
+        """Выполняет парсинг Google таблиц"""
+        parse_start = time.time()
         
         try:
-            # 1. Парсинг Google таблиц
             print("🔄 Парсинг Google таблиц...")
-            parse_start = time.time()
             
             # Получаем данные в формате словаря {sheet_name: SheetsData}
             sheets_data = self.sheets_parser.parse_all_sheets()
             
             # Преобразуем в нужный формат
-            parsed_data = self.sheets_parser.to_dict(sheets_data)
+            self.parsed_data = self.sheets_parser.to_dict(sheets_data)
             
             parse_time = time.time() - parse_start
             
-            if not parsed_data.get('sheets'):
+            if not self.parsed_data.get('sheets'):
                 return {
                     'success': False,
                     'error': 'Не удалось получить данные из Google таблиц',
-                    'parse_time': parse_time,
-                    'api_time': 0,
-                    'total_time': time.time() - cycle_start_time
+                    'parse_time': parse_time
                 }
             
-            print(f"✅ Парсинг завершен за {parse_time:.2f}с. Найдено листов: {len(parsed_data['sheets'])}")
+            sheets_count = len(self.parsed_data['sheets'])
+            total_products = sum(len(sheet.get('products', [])) for sheet in self.parsed_data['sheets'].values())
             
-            # 2. Мониторинг через API WB
-            print("🔄 Запрос API WildBerries...")
-            api_start = time.time()
+            print(f"✅ Парсинг завершен за {parse_time:.2f}с. Найдено листов: {sheets_count}, товаров: {total_products}")
+            print(f"🚀 Оптимизация: Будет выполнено ровно 3 API запроса (склады + коэффициенты + все товары)")
+            print(f"📦 Все {total_products} товаров будут отправлены одним POST запросом")
+            
+            return {
+                'success': True,
+                'parse_time': parse_time
+            }
+            
+        except Exception as e:
+            parse_time = time.time() - parse_start
+            return {
+                'success': False,
+                'error': str(e),
+                'parse_time': parse_time
+            }
+    
+    def run_api_request(self) -> Dict[str, Any]:
+        """Выполняет один API запрос"""
+        if not self.parsed_data:
+            return {
+                'success': False,
+                'error': 'Нет данных для API запроса. Сначала выполните парсинг.',
+                'api_time': 0
+            }
+        
+        api_start = time.time()
+        
+        try:
+            print(f"🔄 API запрос #{self.current_api_requests + 1}/6...")
             
             # Сохраняем parsed_data во временный файл для WBMonitor
             temp_file = 'temp_parsed_data.json'
             with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(parsed_data, f, ensure_ascii=False, indent=2)
+                json.dump(self.parsed_data, f, ensure_ascii=False, indent=2)
             
             try:
                 monitoring_results = self.wb_monitor.monitor_parsed_data(temp_file)
@@ -251,75 +362,150 @@ class WBSlotsMonitor:
                     os.remove(temp_file)
             
             api_time = time.time() - api_start
-            total_time = time.time() - cycle_start_time
+            self.current_api_requests += 1
             
-            print(f"✅ API запросы завершены за {api_time:.2f}с")
+            print(f"✅ API запрос завершен за {api_time:.2f}с")
             
-            # 3. Отображение результатов
-            self.display_monitoring_results(parsed_data, monitoring_results)
+            # Отображение результатов
+            self.display_monitoring_results(self.parsed_data, monitoring_results)
             
             return {
                 'success': True,
-                'parsed_data': parsed_data,
                 'monitoring_results': monitoring_results,
-                'parse_time': parse_time,
-                'api_time': api_time,
-                'total_time': total_time
+                'api_time': api_time
             }
             
         except Exception as e:
-            total_time = time.time() - cycle_start_time
+            api_time = time.time() - api_start
             return {
                 'success': False,
                 'error': str(e),
-                'parse_time': 0,
-                'api_time': 0,
-                'total_time': total_time
+                'api_time': api_time
             }
     
+    def run_optimized_cycle(self) -> Dict[str, Any]:
+        """Выполняет оптимизированный цикл: парсинг + API запрос"""
+        cycle_start_time = time.time()
+        
+        # 1. Парсинг (только если начинаем новый минутный цикл)
+        if self.current_api_requests == 0:
+            # Начинаем новый минутный цикл
+            self.reset_minute_cycle()
+            
+            parse_result = self.run_parsing_cycle()
+            if not parse_result['success']:
+                return {
+                    'success': False,
+                    'error': parse_result['error'],
+                    'parse_time': parse_result['parse_time'],
+                    'api_time': 0,
+                    'total_time': time.time() - cycle_start_time,
+                    'cycle_type': 'parse_failed'
+                }
+        else:
+            parse_result = {'success': True, 'parse_time': 0}
+        
+        # 2. API запрос
+        api_result = self.run_api_request()
+        
+        total_time = time.time() - cycle_start_time
+        
+        # Определяем тип цикла и сбрасываем счетчик если нужно
+        if self.current_api_requests == 1:
+            cycle_type = 'parse_and_api'  # Парсинг + первый API
+        elif self.current_api_requests < self.api_requests_per_minute:
+            cycle_type = 'api_only'  # Только API
+        else:
+            cycle_type = 'api_final'  # Последний API в серии
+            self.current_api_requests = 0  # Сбрасываем счетчик для следующего минутного цикла
+        
+        return {
+            'success': api_result['success'],
+            'error': api_result.get('error'),
+            'parse_time': parse_result['parse_time'],
+            'api_time': api_result['api_time'],
+            'total_time': total_time,
+            'cycle_type': cycle_type,
+            'api_requests_count': self.current_api_requests if cycle_type != 'api_final' else self.api_requests_per_minute
+        }
+    
     def run_continuous_monitoring(self):
-        """Запускает непрерывный мониторинг"""
-        print("🚀 Запуск непрерывного мониторинга WB слотов")
-        print(f"⏰ Интервал обновления: {self.update_interval} секунд")
+        """Запускает оптимизированный непрерывный мониторинг"""
+        print("🚀 Запуск АДАПТИВНОГО мониторинга WB слотов")
+        print(f"🎯 ОПТИМИЗАЦИЯ: Точно 3 API запроса за цикл (склады + коэффициенты + все товары)")
+        print(f"🧠 АДАПТИВНЫЕ ПАУЗЫ: Динамический расчет пауз на основе реального времени API")
+        print(f"📋 Стратегия: Парсинг + API → адаптивная пауза → API → адаптивная пауза → повтор")
+        print(f"⚡ Лимит WB: {self.api_requests_per_minute} запросов/минуту для КАЖДОГО endpoint'а")
+        print(f"🎯 Цель: {self.api_requests_per_minute} циклов ровно за {self.target_minute_duration} секунд")
         self.print_separator()
         
         try:
             while True:
                 self.cycle_count += 1
                 
-                print(f"\n🔄 ЦИКЛ #{self.cycle_count} - {datetime.now().strftime('%H:%M:%S')}")
+                # Выполняем оптимизированный цикл
+                result = self.run_optimized_cycle()
                 
-                # Выполняем мониторинг
-                result = self.run_monitoring_cycle()
+                # Определяем тип сообщения
+                cycle_type = result.get('cycle_type', 'unknown')
+                
+                if cycle_type == 'parse_and_api':
+                    print(f"\n🔄 ЦИКЛ #{self.cycle_count} [ПАРСИНГ + API #1] - {datetime.now().strftime('%H:%M:%S')}")
+                elif cycle_type == 'api_only':
+                    api_num = result.get('api_requests_count', 0)
+                    print(f"\n🔄 ЦИКЛ #{self.cycle_count} [API #{api_num}] - {datetime.now().strftime('%H:%M:%S')}")
+                elif cycle_type == 'api_final':
+                    print(f"\n🔄 ЦИКЛ #{self.cycle_count} [API #6 - ФИНАЛ] - {datetime.now().strftime('%H:%M:%S')}")
                 
                 # Логируем время выполнения
                 if result['success']:
                     print(f"\n⏱️  ВРЕМЯ ВЫПОЛНЕНИЯ:")
-                    print(f"   Парсинг таблиц: {result['parse_time']:.2f}с")
-                    print(f"   API запросы: {result['api_time']:.2f}с")
-                    print(f"   Общее время: {result['total_time']:.2f}с")
+                    if result['parse_time'] > 0:
+                        print(f"   📊 Парсинг таблиц: {result['parse_time']:.2f}с")
+                    print(f"   🌐 API запрос: {result['api_time']:.2f}с")
+                    print(f"   ⚡ Общее время: {result['total_time']:.2f}с")
                     
                     # Сохраняем последнее успешное обновление
                     self.last_update = datetime.now()
+                    
+                    # Рассчитываем адаптивную паузу
+                    adaptive_pause = self.calculate_adaptive_pause(result['api_time'])
+                    
+                    # Определяем следующую паузу и действие
+                    if cycle_type == 'api_final':
+                        next_action = "новый цикл с парсингом"
+                        print(f"🎯 Завершена серия из {self.api_requests_per_minute} API запросов")
+                    else:
+                        next_action = f"API запрос #{result.get('api_requests_count', 0) + 1}"
+                    
+                    # Логируем адаптивные тайминги
+                    self.log_adaptive_timing(result['api_time'], adaptive_pause)
+                    next_pause = adaptive_pause
+                        
                 else:
                     print(f"\n❌ ОШИБКА ЦИКЛА: {result['error']}")
                     print(f"⏱️  Время до ошибки: {result['total_time']:.2f}с")
+                    next_pause = self.api_pause_between_requests
+                    next_action = "повтор"
                 
-                # Ждем до следующего цикла
-                print(f"\n😴 Ожидание {self.update_interval} секунд до следующего цикла...")
-                print(f"⏰ Следующий цикл в: {(datetime.now() + timedelta(seconds=self.update_interval)).strftime('%H:%M:%S')}")
+                # Ждем до следующего действия
+                print(f"\n😴 Адаптивная пауза {next_pause:.1f}с до: {next_action}")
+                next_time = (datetime.now() + timedelta(seconds=next_pause)).strftime('%H:%M:%S')
+                print(f"⏰ Следующее действие в: {next_time}")
+                    
                 self.print_separator(".", 60)
-                
-                time.sleep(self.update_interval)
+                time.sleep(next_pause)
                 
         except KeyboardInterrupt:
             print(f"\n\n🛑 Мониторинг остановлен пользователем")
             print(f"📊 Выполнено циклов: {self.cycle_count}")
+            print(f"🌐 Выполнено API запросов: {self.current_api_requests}")
             if self.last_update:
                 print(f"🕐 Последнее обновление: {self.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
         except Exception as e:
             print(f"\n\n💥 КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
             print(f"📊 Выполнено циклов: {self.cycle_count}")
+            print(f"🌐 Выполнено API запросов: {self.current_api_requests}")
 
 
 def main():
@@ -337,11 +523,15 @@ def main():
     monitor = WBSlotsMonitor(update_interval=args.interval)
     
     if args.once:
-        print("🔄 Выполнение одного цикла мониторинга...")
-        result = monitor.run_monitoring_cycle()
+        print("🔄 Выполнение одного оптимизированного цикла...")
+        result = monitor.run_optimized_cycle()
         
         if result['success']:
-            print(f"\n✅ Мониторинг завершен успешно за {result['total_time']:.2f}с")
+            print(f"\n✅ Цикл завершен успешно за {result['total_time']:.2f}с")
+            if result['parse_time'] > 0:
+                print(f"📊 Парсинг: {result['parse_time']:.2f}с")
+            print(f"🌐 API: {result['api_time']:.2f}с")
+            print(f"🎯 Тип цикла: {result['cycle_type']}")
         else:
             print(f"\n❌ Ошибка мониторинга: {result['error']}")
             sys.exit(1)
