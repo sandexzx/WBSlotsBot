@@ -1,0 +1,299 @@
+Для доступа к методам используйте токен для категории Поставки
+
+Получение информации для формирования поставок на склады WB
+
+Коэффициенты приёмки
+/api/v1/acceptance/coefficients
+
+
+get
+https://supplies-api.wildberries.ru/api/v1/acceptance/coefficients
+Описание метода
+Возвращает коэффициенты приёмки для конкретных складов на ближайшие 14 дней
+
+Приёмка для поставки доступна только при сочетании:
+coefficient — 0 или 1
+и
+allowUnload — true
+Максимум 6 запросов в минуту на один аккаунт продавца
+
+Пример ответа: 
+
+[
+  {
+    "date": "2024-04-11T00:00:00Z",
+    "coefficient": -1,
+    "warehouseID": 217081,
+    "warehouseName": "Сц Брянск 2",
+    "allowUnload": false,
+    "boxTypeName": "Суперсейф",
+    "boxTypeID": 6,
+    "storageCoef": null,
+    "deliveryCoef": null,
+    "deliveryBaseLiter": null,
+    "deliveryAdditionalLiter": null,
+    "storageBaseLiter": null,
+    "storageAdditionalLiter": null,
+    "isSortingCenter": true
+  }
+]
+
+Подробности: 
+
+Response Schema: application/json
+Array 
+date	
+string
+Дата начала действия коэффициента
+
+coefficient	
+number
+Коэффициент приёмки:
+
+-1 — приёмка недоступна, вне зависимости от значения поля allowUnload
+0 — бесплатная приёмка
+от 1 — множитель стоимости приёмки
+warehouseID	
+integer
+ID склада. По нему можно получить информацию о складе
+
+warehouseName	
+string
+Название склада
+
+allowUnload	
+boolean
+Доступность приёмки для поставок данного типа, смотри значение поля boxTypeName:
+
+true — приёмка доступна
+false — приёмка не доступна
+boxTypeName	
+string
+Тип поставки:
+
+Короба
+Монопаллеты
+Суперсейф
+QR-поставка с коробами
+boxTypeID	
+integer
+ID типа поставки:
+
+2 — Короба
+5 — Монопаллеты
+6 — Суперсейф
+Для типа поставки QR-поставка с коробами поле не возвращается
+storageCoef	
+string or null
+Коэффициент хранения
+
+deliveryCoef	
+string or null
+Коэффициент логистики
+
+deliveryBaseLiter	
+string or null
+Стоимость логистики первого литра
+
+deliveryAdditionalLiter	
+string or null
+Стоимость логистики каждого следующего литра
+
+storageBaseLiter	
+string or null
+Стоимость хранения:
+Для паллет - стоимость за одну паллету
+Для коробов - стоимость хранения за первый литр
+
+storageAdditionalLiter	
+string or null
+Стоимость хранения каждого последующего литра:
+Для паллет - всегда будет null, т.к. стоимость хранения за единицу паллеты определяется в StorageBaseLiter
+Для коробов - стоимость хранения за каждый последующий литр
+
+isSortingCenter	
+boolean
+Тип склада:
+
+true — сортировочный центр (СЦ)
+false — обычный
+
+
+
+
+
+Опции приёмки
+/api/v1/acceptance/options
+
+
+post
+https://supplies-api.wildberries.ru/api/v1/acceptance/options
+Описание метода
+Возвращает информацию о том, какие склады и типы упаковки доступны для поставки. Список складов определяется по баркоду товара и его количеству
+
+Максимум 6 запросов в минуту на один аккаунт продавца
+Authorizations:
+HeaderApiKey
+query Parameters
+warehouseID	
+string
+Example: warehouseID=507
+ID склада.
+Если параметр не указан, возвращаются данные по всем складам.
+Максимум одно значение
+
+Request Body schema: application/json
+required
+Array (<= 5000 items)
+quantity	
+integer [ 1 .. 999999 ]
+Суммарное количество товаров, планируемых для поставки.
+Максимум 999999
+
+barcode	
+string
+Баркод из карточки товара
+
+Подробности: 
+
+result	
+Array of objects
+requestId	
+string
+ID запроса при наличии ошибок
+
+
+
+Пример запроса: 
+
+[
+  {
+    "quantity": 1,
+    "barcode": "k"
+  },
+  {
+    "quantity": 7,
+    "barcode": "1111111111"
+  }
+]
+
+Пример ответа: 
+
+{
+  "result": [
+    {
+      "barcode": "кrrr",
+      "warehouses": null,
+      "error": {
+        "title": "barcode validation error",
+        "detail": "barcode кrrr is not found"
+      },
+      "isError": true
+    },
+    {
+      "barcode": "123456789",
+      "warehouses": [
+        {
+          "warehouseID": 205349,
+          "canBox": true,
+          "canMonopallet": false,
+          "canSupersafe": false
+        },
+        {
+          "warehouseID": 211622,
+          "canBox": false,
+          "canMonopallet": true,
+          "canSupersafe": false
+        },
+        {
+          "warehouseID": 214951,
+          "canBox": true,
+          "canMonopallet": false,
+          "canSupersafe": false
+        },
+        {
+          "warehouseID": 206319,
+          "canBox": true,
+          "canMonopallet": false,
+          "canSupersafe": false
+        }
+      ]
+    }
+  ],
+  "requestId": "kr53d2bRKYmkK2N6zaNKHs"
+}
+
+Список складов
+/api/v1/warehouses
+
+
+get
+https://supplies-api.wildberries.ru/api/v1/warehouses
+Описание метода
+Возвращает список складов WB
+
+Максимум 6 запросов в минуту на один аккаунт продавца
+
+Пример ответа: 
+
+[
+  {
+    "ID": 300461,
+    "name": "Гомель 2",
+    "address": "Гомель, Могилёвская улица 1/А",
+    "workTime": "24/7",
+    "acceptsQR": false,
+    "isActive": false,
+    "isTransitActive": true
+  }
+]
+
+Подробности: 
+
+Response Schema: application/json
+Array 
+ID	
+integer
+ID склада
+
+name	
+string
+Название склада
+
+address	
+string
+Адрес склада
+
+workTime	
+string
+Режим работы склада
+
+acceptsQr	
+boolean
+Принимает ли склад QR-поставки:
+
+true — да
+false — нет
+isActive	
+boolean
+Доступен ли в качестве склада назначения:
+
+true — да
+false — нет
+isTransitActive	
+boolean
+Доступен ли в качестве транзитного склада:
+
+true — да
+false — нет
+
+Требования от заказчиков: 
+
+Так чтобы с листа гугл таблиц забирались:
+- баркоды товаров
+- количество единиц товара
+- на какие склады может быть поставлен данный товар
+-до какого коээфициента платной приемки можно бронировать поставку (этого в таблицах сейчас нет, будем показывать все слоты с доступными коэфами)
+-с какой по какую дату можно бронировать
+
+Надо, чтобы проверялась доступность поставок по параметрам и бронирование их на те товары, что указаны на листах гугл-документа. 

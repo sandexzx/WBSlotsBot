@@ -1,6 +1,4 @@
 .env
-wb_api_documentation.txt
 .venv/
 __pycache__/
-credentials.json
-parsed_data.json
+*.json
