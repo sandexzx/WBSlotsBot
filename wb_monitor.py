@@ -3,8 +3,9 @@ import sys
 import os
 import time
 import json
+import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 # Добавляем src в путь для импорта модулей
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -14,12 +15,13 @@ from wb_api import WBMonitor, WildBerriesAPI
 
 
 class WBSlotsMonitor:
-    def __init__(self, update_interval: int = 300):  # 5 минут по умолчанию
+    def __init__(self, update_interval: int = 300, telegram_notifier=None):  # 5 минут по умолчанию
         self.update_interval = update_interval
         self.sheets_parser = create_parser_from_env()
         self.wb_monitor = WBMonitor()
         self.last_update = None
         self.cycle_count = 0
+        self.telegram_notifier = telegram_notifier
         
         # Настройки для оптимизации API запросов
         self.api_requests_per_minute = 6  # Каждый endpoint имеет свой лимит 6/минуту
@@ -335,8 +337,8 @@ class WBSlotsMonitor:
                 'parse_time': parse_time
             }
     
-    def run_api_request(self) -> Dict[str, Any]:
-        """Выполняет один API запрос"""
+    async def run_api_request(self) -> Dict[str, Any]:
+        """Выполняет один API запрос с проверкой остановки"""
         if not self.parsed_data:
             return {
                 'success': False,
@@ -355,7 +357,13 @@ class WBSlotsMonitor:
                 json.dump(self.parsed_data, f, ensure_ascii=False, indent=2)
             
             try:
-                monitoring_results = self.wb_monitor.monitor_parsed_data(temp_file)
+                # Выполняем API запрос в executor чтобы он был прерываемым
+                loop = asyncio.get_event_loop()
+                monitoring_results = await loop.run_in_executor(
+                    None, 
+                    self.wb_monitor.monitor_parsed_data, 
+                    temp_file
+                )
             finally:
                 # Удаляем временный файл
                 if os.path.exists(temp_file):
@@ -369,12 +377,27 @@ class WBSlotsMonitor:
             # Отображение результатов
             self.display_monitoring_results(self.parsed_data, monitoring_results)
             
+            # Отправляем уведомление в Telegram если есть telegram_notifier
+            if self.telegram_notifier:
+                try:
+                    await self.telegram_notifier.send_notification(self.parsed_data, monitoring_results)
+                except Exception as e:
+                    print(f"⚠️  Ошибка отправки Telegram уведомления: {e}")
+            
             return {
                 'success': True,
                 'monitoring_results': monitoring_results,
                 'api_time': api_time
             }
             
+        except asyncio.CancelledError:
+            print("🛑 API запрос отменен")
+            api_time = time.time() - api_start
+            return {
+                'success': False,
+                'error': 'API запрос отменен',
+                'api_time': api_time
+            }
         except Exception as e:
             api_time = time.time() - api_start
             return {
@@ -383,7 +406,7 @@ class WBSlotsMonitor:
                 'api_time': api_time
             }
     
-    def run_optimized_cycle(self) -> Dict[str, Any]:
+    async def run_optimized_cycle(self) -> Dict[str, Any]:
         """Выполняет оптимизированный цикл: парсинг + API запрос"""
         cycle_start_time = time.time()
         
@@ -406,7 +429,7 @@ class WBSlotsMonitor:
             parse_result = {'success': True, 'parse_time': 0}
         
         # 2. API запрос
-        api_result = self.run_api_request()
+        api_result = await self.run_api_request()
         
         total_time = time.time() - cycle_start_time
         
@@ -429,7 +452,7 @@ class WBSlotsMonitor:
             'api_requests_count': self.current_api_requests if cycle_type != 'api_final' else self.api_requests_per_minute
         }
     
-    def run_continuous_monitoring(self):
+    async def run_continuous_monitoring(self, shutdown_event=None):
         """Запускает оптимизированный непрерывный мониторинг"""
         print("🚀 Запуск АДАПТИВНОГО мониторинга WB слотов")
         print(f"🎯 ОПТИМИЗАЦИЯ: Точно 3 API запроса за цикл (склады + коэффициенты + все товары)")
@@ -441,10 +464,15 @@ class WBSlotsMonitor:
         
         try:
             while True:
+                # Проверяем флаг остановки перед каждым циклом
+                if shutdown_event and shutdown_event.is_set():
+                    print("\n🛑 Получен сигнал остановки мониторинга")
+                    break
+                    
                 self.cycle_count += 1
                 
                 # Выполняем оптимизированный цикл
-                result = self.run_optimized_cycle()
+                result = await self.run_optimized_cycle()
                 
                 # Определяем тип сообщения
                 cycle_type = result.get('cycle_type', 'unknown')
@@ -488,14 +516,31 @@ class WBSlotsMonitor:
                     next_pause = self.api_pause_between_requests
                     next_action = "повтор"
                 
-                # Ждем до следующего действия
+                # Ждем до следующего действия с проверкой shutdown
                 print(f"\n😴 Адаптивная пауза {next_pause:.1f}с до: {next_action}")
                 next_time = (datetime.now() + timedelta(seconds=next_pause)).strftime('%H:%M:%S')
                 print(f"⏰ Следующее действие в: {next_time}")
                     
                 self.print_separator(".", 60)
-                time.sleep(next_pause)
                 
+                # Прерываемый sleep с проверкой shutdown_event
+                if shutdown_event:
+                    try:
+                        await asyncio.wait_for(shutdown_event.wait(), timeout=next_pause)
+                        print("\n🛑 Получен сигнал остановки во время паузы")
+                        break
+                    except asyncio.TimeoutError:
+                        # Timeout означает что пауза закончилась и можно продолжать
+                        pass
+                else:
+                    await asyncio.sleep(next_pause)
+                
+        except asyncio.CancelledError:
+            print(f"\n\n🛑 Мониторинг отменен")
+            print(f"📊 Выполнено циклов: {self.cycle_count}")
+            print(f"🌐 Выполнено API запросов: {self.current_api_requests}")
+            if self.last_update:
+                print(f"🕐 Последнее обновление: {self.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
         except KeyboardInterrupt:
             print(f"\n\n🛑 Мониторинг остановлен пользователем")
             print(f"📊 Выполнено циклов: {self.cycle_count}")
@@ -508,7 +553,7 @@ class WBSlotsMonitor:
             print(f"🌐 Выполнено API запросов: {self.current_api_requests}")
 
 
-def main():
+async def main():
     """Основная функция"""
     import argparse
     
@@ -524,7 +569,7 @@ def main():
     
     if args.once:
         print("🔄 Выполнение одного оптимизированного цикла...")
-        result = monitor.run_optimized_cycle()
+        result = await monitor.run_optimized_cycle()
         
         if result['success']:
             print(f"\n✅ Цикл завершен успешно за {result['total_time']:.2f}с")
@@ -536,8 +581,8 @@ def main():
             print(f"\n❌ Ошибка мониторинга: {result['error']}")
             sys.exit(1)
     else:
-        monitor.run_continuous_monitoring()
+        await monitor.run_continuous_monitoring()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
