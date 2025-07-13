@@ -31,11 +31,8 @@ class TelegramNotifier:
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
         
-        # Создаем сессию с увеличенными таймаутами для серверов
-        import aiohttp
-        timeout = aiohttp.ClientTimeout(total=60, sock_read=30)
-        session = AiohttpSession(timeout=timeout)
-        self.bot = Bot(token=self.bot_token, session=session)
+        # Создаем бота с базовой конфигурацией
+        self.bot = Bot(token=self.bot_token)
         self.dp = Dispatcher(storage=MemoryStorage())
         self.subscribers: Dict[int, Dict[str, Optional[str]]] = {}  # {user_id: {"last_hash": "..."}}
         self.subscriptions_file = 'subscriptions.json'
@@ -427,7 +424,7 @@ class TelegramNotifier:
     async def start_bot(self):
         """Запускает бота"""
         logger.info("Запуск Telegram бота...")
-        await self.dp.start_polling(self.bot)
+        await self.dp.start_polling(self.bot, polling_timeout=30)
     
     async def stop_bot(self):
         """Останавливает бота"""
