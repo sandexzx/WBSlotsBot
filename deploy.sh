@@ -9,7 +9,7 @@ set -e  # Выход при любой ошибке
 
 # Конфигурация
 PROJECT_NAME="WBSlotsBot"
-REPO_URL="https://github.com/YOUR_USERNAME/WBSlotsBot.git"  # ИЗМЕНИТЬ НА ВАШ РЕПОЗИТОРИЙ!
+REPO_URL="https://github.com/sandexzx/WBSlotsBot.git"  # ИЗМЕНИТЬ НА ВАШ РЕПОЗИТОРИЙ!
 INSTALL_DIR="/opt/wbslotsbot"
 SERVICE_NAME="wbslotsbot"
 PYTHON_VERSION="python3"
