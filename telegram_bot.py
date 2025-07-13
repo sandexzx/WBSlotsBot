@@ -32,10 +32,9 @@ class TelegramNotifier:
             raise ValueError("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
         
         # Создаем сессию с увеличенными таймаутами для серверов
-        session = AiohttpSession(
-            timeout=60,  # Общий таймаут 60 секунд
-            request_timeout=30  # Таймаут запроса 30 секунд
-        )
+        import aiohttp
+        timeout = aiohttp.ClientTimeout(total=60, sock_read=30)
+        session = AiohttpSession(timeout=timeout)
         self.bot = Bot(token=self.bot_token, session=session)
         self.dp = Dispatcher(storage=MemoryStorage())
         self.subscribers: Dict[int, Dict[str, Optional[str]]] = {}  # {user_id: {"last_hash": "..."}}
