@@ -12,6 +12,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
@@ -30,7 +31,12 @@ class TelegramNotifier:
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN не найден в переменных окружения")
         
-        self.bot = Bot(token=self.bot_token)
+        # Создаем сессию с увеличенными таймаутами для серверов
+        session = AiohttpSession(
+            timeout=60,  # Общий таймаут 60 секунд
+            request_timeout=30  # Таймаут запроса 30 секунд
+        )
+        self.bot = Bot(token=self.bot_token, session=session)
         self.dp = Dispatcher(storage=MemoryStorage())
         self.subscribers: Dict[int, Dict[str, Optional[str]]] = {}  # {user_id: {"last_hash": "..."}}
         self.subscriptions_file = 'subscriptions.json'
