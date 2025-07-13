@@ -3,8 +3,9 @@ import os
 import json
 import asyncio
 import logging
+import hashlib
 from datetime import datetime
-from typing import Set, Dict, Any
+from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher, types
@@ -31,7 +32,7 @@ class TelegramNotifier:
         
         self.bot = Bot(token=self.bot_token)
         self.dp = Dispatcher(storage=MemoryStorage())
-        self.subscribed_users: Set[int] = set()
+        self.subscribers: Dict[int, Dict[str, Optional[str]]] = {}  # {user_id: {"last_hash": "..."}}
         self.subscriptions_file = 'subscriptions.json'
         
         # Загружаем подписки из файла
@@ -46,22 +47,33 @@ class TelegramNotifier:
             if os.path.exists(self.subscriptions_file):
                 with open(self.subscriptions_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    self.subscribed_users = set(data.get('subscribed_users', []))
-                logger.info(f"Загружено {len(self.subscribed_users)} подписчиков")
+                    
+                    # Поддержка старого формата для миграции
+                    if 'subscribed_users' in data:
+                        # Старый формат - конвертируем
+                        old_users = data.get('subscribed_users', [])
+                        self.subscribers = {user_id: {"last_hash": None} for user_id in old_users}
+                        logger.info(f"Мигрирован старый формат подписок для {len(old_users)} пользователей")
+                    else:
+                        # Новый формат
+                        subscribers_data = data.get('subscribers', {})
+                        self.subscribers = {int(k): v for k, v in subscribers_data.items()}
+                    
+                logger.info(f"Загружено {len(self.subscribers)} подписчиков")
         except Exception as e:
             logger.error(f"Ошибка при загрузке подписок: {e}")
-            self.subscribed_users = set()
+            self.subscribers = {}
     
     def save_subscriptions(self):
         """Сохраняет список подписчиков в файл"""
         try:
             data = {
-                'subscribed_users': list(self.subscribed_users),
+                'subscribers': {str(k): v for k, v in self.subscribers.items()},
                 'updated_at': datetime.now().isoformat()
             }
             with open(self.subscriptions_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"Сохранено {len(self.subscribed_users)} подписчиков")
+            logger.info(f"Сохранено {len(self.subscribers)} подписчиков")
         except Exception as e:
             logger.error(f"Ошибка при сохранении подписок: {e}")
     
@@ -74,7 +86,7 @@ class TelegramNotifier:
             username = message.from_user.username or "Неизвестно"
             
             # Автоматически подписываем пользователя
-            self.subscribed_users.add(user_id)
+            self.subscribers[user_id] = {"last_hash": None}
             self.save_subscriptions()
             
             # Создаем клавиатуру с кнопкой отписки
@@ -104,8 +116,8 @@ class TelegramNotifier:
             user_id = callback.from_user.id
             username = callback.from_user.username or "Неизвестно"
             
-            if user_id in self.subscribed_users:
-                self.subscribed_users.remove(user_id)
+            if user_id in self.subscribers:
+                del self.subscribers[user_id]
                 self.save_subscriptions()
                 
                 # Создаем клавиатуру с кнопкой подписки
@@ -128,8 +140,8 @@ class TelegramNotifier:
             user_id = callback.from_user.id
             username = callback.from_user.username or "Неизвестно"
             
-            if user_id not in self.subscribed_users:
-                self.subscribed_users.add(user_id)
+            if user_id not in self.subscribers:
+                self.subscribers[user_id] = {"last_hash": None}
                 self.save_subscriptions()
                 
                 # Создаем клавиатуру с кнопкой отписки
@@ -147,6 +159,10 @@ class TelegramNotifier:
             
             await callback.answer()
     
+    def calculate_message_hash(self, message: str) -> str:
+        """Вычисляет SHA256 хеш сообщения для проверки дублирования"""
+        return hashlib.sha256(message.encode('utf-8')).hexdigest()
+    
     def format_datetime(self, dt_str: str) -> str:
         """Форматирует дату для красивого вывода"""
         try:
@@ -161,11 +177,10 @@ class TelegramNotifier:
         if not monitoring_results.get('success'):
             return f"❌ Ошибка мониторинга: {monitoring_results.get('error', 'Неизвестная ошибка')}"
         
-        timestamp = datetime.now().strftime('%d.%m.%Y %H:%M')
         summary = monitoring_results.get('summary', {})
         
         message_parts = [
-            f"🎯 <b>WB SLOTS UPDATE - {timestamp}</b>",
+            f"🎯 <b>WB SLOTS UPDATE</b>",
             "",
             f"📊 Обработано листов: {summary.get('total_sheets', 0)}",
             f"✅ Листов с слотами: {summary.get('sheets_with_slots', 0)}",
@@ -256,7 +271,19 @@ class TelegramNotifier:
             # Отображаем информацию по каждому доступному складу
             has_available_warehouses = False
             
+            # Сортируем склады по названию для стабильного порядка
+            sorted_warehouses = []
             for warehouse_option in warehouses_for_barcode:
+                warehouse_id = warehouse_option['warehouseID']
+                warehouse_slots = slots_by_warehouse.get(warehouse_id, [])
+                if warehouse_slots:
+                    warehouse_name = warehouse_slots[0]['warehouse_name']
+                    sorted_warehouses.append((warehouse_name, warehouse_option))
+            
+            # Сортируем по названию склада
+            sorted_warehouses.sort(key=lambda x: x[0])
+            
+            for warehouse_name, warehouse_option in sorted_warehouses:
                 warehouse_id = warehouse_option['warehouseID']
                 
                 # Проверяем, есть ли этот склад в наших слотах
@@ -264,8 +291,6 @@ class TelegramNotifier:
                 
                 if not warehouse_slots:
                     continue  # Пропускаем склады без доступных слотов
-                
-                warehouse_name = warehouse_slots[0]['warehouse_name']  # Берем название из слотов
                 
                 # Определяем доступные упаковки для товара на этом складе
                 available_packaging = {}
@@ -335,19 +360,38 @@ class TelegramNotifier:
             message_parts.append("-" * 60)  # Разделитель между товарами
     
     async def send_notification(self, parsed_data: Dict[str, Any], monitoring_results: Dict[str, Any]):
-        """Отправляет уведомление всем подписчикам"""
+        """Отправляет уведомление подписчикам с персональной проверкой хешей"""
         
-        if not self.subscribed_users:
+        if not self.subscribers:
             logger.info("Нет подписчиков для отправки уведомлений")
             return
         
         message = self.format_monitoring_message(parsed_data, monitoring_results)
+        new_message_hash = self.calculate_message_hash(message)
         
-        # Отправляем сообщение всем подписчикам
+        # Отправляем сообщение только тем, у кого хеш отличается
         successful_sends = 0
         failed_sends = 0
+        users_to_send = []
         
-        for user_id in self.subscribed_users.copy():  # Копия для безопасного изменения
+        # Определяем кому отправлять
+        for user_id, user_data in self.subscribers.items():
+            user_last_hash = user_data.get("last_hash")
+            if user_last_hash != new_message_hash:
+                users_to_send.append(user_id)
+                if user_last_hash is None:
+                    logger.info(f"Новый подписчик {user_id}, отправляем текущее состояние")
+                else:
+                    logger.info(f"Содержимое изменилось для пользователя {user_id}")
+        
+        if not users_to_send:
+            logger.info("Сообщение не изменилось ни для одного подписчика, пропускаем отправку")
+            return
+        
+        logger.info(f"Отправляем уведомления {len(users_to_send)} из {len(self.subscribers)} подписчиков")
+        
+        # Отправляем сообщения
+        for user_id in users_to_send:
             try:
                 await self.bot.send_message(
                     chat_id=user_id,
@@ -355,6 +399,8 @@ class TelegramNotifier:
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
+                # Обновляем хеш для этого пользователя
+                self.subscribers[user_id]["last_hash"] = new_message_hash
                 successful_sends += 1
                 await asyncio.sleep(0.1)  # Небольшая пауза между отправками
                 
@@ -363,14 +409,13 @@ class TelegramNotifier:
                 
                 # Если пользователь заблокировал бота, удаляем его из подписчиков
                 if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
-                    self.subscribed_users.remove(user_id)
+                    del self.subscribers[user_id]
                     logger.info(f"Пользователь {user_id} удален из подписчиков (заблокирован)")
                 
                 failed_sends += 1
         
-        # Сохраняем обновленный список подписчиков
-        if failed_sends > 0:
-            self.save_subscriptions()
+        # Сохраняем обновленные данные подписчиков
+        self.save_subscriptions()
         
         logger.info(f"Уведомления отправлены: {successful_sends} успешно, {failed_sends} ошибок")
     
