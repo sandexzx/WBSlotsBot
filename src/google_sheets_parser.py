@@ -19,6 +19,7 @@ class SheetsData:
     start_date: str
     end_date: str
     products: List[ProductInfo]
+    max_coefficient: float
 
 
 class GoogleSheetsParser:
@@ -73,6 +74,13 @@ class GoogleSheetsParser:
         end_date = self.current_worksheet.acell('B6').value
         return start_date, end_date
         
+    def parse_max_coefficient(self) -> float:
+        try:
+            coefficient_value = self.current_worksheet.acell('E1').value
+            return float(coefficient_value) if coefficient_value else 1.0
+        except (ValueError, TypeError):
+            return 1.0
+        
     def parse_products(self) -> List[ProductInfo]:
         start_row = 8
         products = []
@@ -123,12 +131,14 @@ class GoogleSheetsParser:
         warehouses = self.parse_warehouses()
         start_date, end_date = self.parse_dates()
         products = self.parse_products()
+        max_coefficient = self.parse_max_coefficient()
         
         return SheetsData(
             warehouses=warehouses,
             start_date=start_date,
             end_date=end_date,
-            products=products
+            products=products,
+            max_coefficient=max_coefficient
         )
         
     def parse_all_sheets(self) -> Dict[str, SheetsData]:
@@ -161,7 +171,8 @@ class GoogleSheetsParser:
                     {'barcode': product.barcode, 'quantity': product.quantity}
                     for product in sheet_data.products
                 ],
-                'total_products': len(sheet_data.products)
+                'total_products': len(sheet_data.products),
+                'max_coefficient': sheet_data.max_coefficient
             }
             
         return result

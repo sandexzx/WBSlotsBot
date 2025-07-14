@@ -289,10 +289,14 @@ class WildBerriesAPI:
         if 'coefficients' in global_data and global_data['coefficients']:
             our_warehouse_ids = [wid for wid in warehouse_ids.values() if wid is not None]
             
+            # Получаем максимальный коэффициент для этого листа
+            max_coefficient = sheet_data.get('max_coefficient', 1.0)
+            
             available_slots = []
             for coef in global_data['coefficients']:
                 if (coef['warehouseID'] in our_warehouse_ids and 
-                    coef['coefficient'] in [0, 1] and 
+                    coef['coefficient'] != -1 and
+                    coef['coefficient'] <= max_coefficient and 
                     coef['allowUnload'] is True):
                     
                     available_slots.append({
