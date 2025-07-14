@@ -160,6 +160,55 @@ class TelegramNotifier:
                 await callback.answer("Ты уже подписан на уведомления", show_alert=True)
             
             await callback.answer()
+        
+        @self.dp.message(Command("status"))
+        async def cmd_status(message: types.Message):
+            user_id = message.from_user.id
+            username = message.from_user.username or "Неизвестно"
+            
+            # Информация о боте и статусе
+            status_text = [
+                f"🤖 <b>Статус WB Slots Monitor</b>",
+                "",
+                f"👤 Пользователь: @{username}",
+                f"🆔 ID: {user_id}",
+                ""
+            ]
+            
+            # Статус подписки
+            if user_id in self.subscribers:
+                status_text.append("🔔 Подписка: <b>Активна</b>")
+            else:
+                status_text.append("❌ Подписка: <b>Не активна</b>")
+            
+            # Общая статистика
+            status_text.extend([
+                f"👥 Всего подписчиков: {len(self.subscribers)}",
+                "",
+                f"⏰ Время проверки: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}",
+                f"✅ Бот работает нормально"
+            ])
+            
+            # Проверим, есть ли файл с последними результатами мониторинга
+            try:
+                if os.path.exists('test/test_output/parsed_data.json'):
+                    with open('test/test_output/parsed_data.json', 'r', encoding='utf-8') as f:
+                        parsed_data = json.load(f)
+                        parsed_at = parsed_data.get('parsed_at', 'N/A')
+                        total_sheets = parsed_data.get('total_sheets', 0)
+                        
+                        status_text.extend([
+                            "",
+                            f"📊 Последний парсинг: {self.format_datetime(parsed_at)}",
+                            f"📋 Листов обработано: {total_sheets}"
+                        ])
+            except:
+                status_text.extend([
+                    "",
+                    "⚠️ Нет данных о последнем парсинге"
+                ])
+            
+            await message.answer("\n".join(status_text), parse_mode='HTML')
     
     def calculate_message_hash(self, message: str) -> str:
         """Вычисляет SHA256 хеш сообщения для проверки дублирования"""
