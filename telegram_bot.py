@@ -185,8 +185,6 @@ class TelegramNotifier:
             f"🎯 <b>WB SLOTS UPDATE</b>",
             "",
             f"📊 Обработано листов: {summary.get('total_sheets', 0)}",
-            f"✅ Листов с слотами: {summary.get('sheets_with_slots', 0)}",
-            f"🎯 Найдено слотов: {summary.get('total_available_slots', 0)}",
             ""
         ]
         
