@@ -263,7 +263,8 @@ class TelegramNotifier:
             # Используем тот же алгоритм что и в консоли
             self.format_products_analysis_for_telegram(
                 message_parts, products, available_slots, 
-                warehouse_ids, available_options
+                warehouse_ids, available_options, 
+                sheet_data.get('start_date'), sheet_data.get('end_date')
             )
             message_parts.append("")
         
@@ -275,8 +276,27 @@ class TelegramNotifier:
         return message
     
     def format_products_analysis_for_telegram(self, message_parts: list, products: list, available_slots: list, 
-                                            _warehouse_ids: dict, available_options: dict):
+                                            _warehouse_ids: dict, available_options: dict, start_date: str = None, end_date: str = None):
         """Форматирует анализ товаров для Telegram в том же формате что и консоль"""
+        
+        # Парсим даты для фильтрации
+        start_date_obj = None
+        end_date_obj = None
+        
+        if start_date and end_date:
+            try:
+                start_date_obj = datetime.strptime(start_date, '%d.%m.%Y')
+                end_date_obj = datetime.strptime(end_date, '%d.%m.%Y')
+            except ValueError:
+                try:
+                    start_date_obj = datetime.strptime(start_date, '%d.%m')
+                    end_date_obj = datetime.strptime(end_date, '%d.%m')
+                    # Добавляем текущий год, если он не указан
+                    current_year = datetime.now().year
+                    start_date_obj = start_date_obj.replace(year=current_year)
+                    end_date_obj = end_date_obj.replace(year=current_year)
+                except ValueError:
+                    pass
         
         # Создаем словарь опций по баркодам
         options_by_barcode = {}
@@ -350,11 +370,22 @@ class TelegramNotifier:
                 if warehouse_option.get('canSupersafe'):
                     available_packaging['Суперсейф'] = '🔒'
                 
-                # Фильтруем слоты только по доступным упаковкам
+                # Фильтруем слоты только по доступным упаковкам и датам
                 filtered_slots = []
                 for slot in warehouse_slots:
                     if slot['box_type'] in available_packaging:
-                        filtered_slots.append(slot)
+                        # Проверяем, попадает ли дата слота в диапазон поставки
+                        if start_date_obj and end_date_obj:
+                            try:
+                                slot_date = datetime.fromisoformat(slot['date'].replace('Z', '+00:00')).replace(tzinfo=None)
+                                if start_date_obj <= slot_date <= end_date_obj:
+                                    filtered_slots.append(slot)
+                            except ValueError:
+                                # Если не удается парсить дату, оставляем слот (для обратной совместимости)
+                                filtered_slots.append(slot)
+                        else:
+                            # Если нет диапазона дат, оставляем слот
+                            filtered_slots.append(slot)
                 
                 if not filtered_slots:
                     continue  # Пропускаем склады без подходящих слотов
