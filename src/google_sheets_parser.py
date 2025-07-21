@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import time
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 import gspread
@@ -95,23 +96,53 @@ class GoogleSheetsParser:
             return url.split("/d/")[1].split("/")[0]
         raise ValueError(f"Invalid Google Sheets URL: {url}")
         
-    def parse_warehouses(self) -> List[str]:
-        cell_value = self.current_worksheet.acell('B4').value
-        if not cell_value:
-            return []
-        return [warehouse.strip() for warehouse in cell_value.split(',')]
+    def _retry_with_backoff(self, func, max_retries=3):
+        """Выполняет функцию с exponential backoff при ошибках API"""
+        for attempt in range(max_retries):
+            try:
+                return func()
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                
+                if "429" in str(e) or "quota" in str(e).lower() or "limit" in str(e).lower():
+                    wait_time = (2 ** attempt) + (attempt * 0.1)
+                    self.logger.warning(f"API limit hit, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    raise
+    
+    def parse_metadata(self) -> Tuple[List[str], str, str, float]:
+        """Парсит метаданные листа одним batch запросом"""
+        def _get_metadata():
+            return self.current_worksheet.batch_get(['B4', 'B5', 'B6', 'E1'])
         
-    def parse_dates(self) -> Tuple[str, str]:
-        start_date = self.current_worksheet.acell('B5').value
-        end_date = self.current_worksheet.acell('B6').value
-        return start_date, end_date
-        
-    def parse_max_coefficient(self) -> float:
         try:
-            coefficient_value = self.current_worksheet.acell('E1').value
-            return float(coefficient_value) if coefficient_value else 1.0
-        except (ValueError, TypeError):
-            return 1.0
+            batch_result = self._retry_with_backoff(_get_metadata)
+            
+            # Извлекаем значения из batch результата
+            warehouses_value = batch_result[0][0][0] if batch_result[0] and batch_result[0][0] else None
+            start_date = batch_result[1][0][0] if batch_result[1] and batch_result[1][0] else None
+            end_date = batch_result[2][0][0] if batch_result[2] and batch_result[2][0] else None
+            coefficient_value = batch_result[3][0][0] if batch_result[3] and batch_result[3][0] else None
+            
+            # Обрабатываем warehouses
+            warehouses = []
+            if warehouses_value:
+                warehouses = [warehouse.strip() for warehouse in warehouses_value.split(',')]
+            
+            # Обрабатываем коэффициент
+            max_coefficient = 1.0
+            try:
+                max_coefficient = float(coefficient_value) if coefficient_value else 1.0
+            except (ValueError, TypeError):
+                max_coefficient = 1.0
+            
+            return warehouses, start_date, end_date, max_coefficient
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка получения метаданных листа '{self.current_worksheet.title}': {str(e)}")
+            return [], None, None, 1.0
         
     def parse_products(self) -> List[ProductInfo]:
         start_row = 8
@@ -125,9 +156,13 @@ class GoogleSheetsParser:
                 barcode_range = f'B{batch_start}:B{batch_end}'
                 quantity_range = f'C{batch_start}:C{batch_end}'
                 
+                def _get_batch_data():
+                    return self.current_worksheet.batch_get([barcode_range, quantity_range])
+                
                 try:
-                    barcode_values = self.current_worksheet.batch_get([barcode_range])[0]
-                    quantity_values = self.current_worksheet.batch_get([quantity_range])[0]
+                    batch_result = self._retry_with_backoff(_get_batch_data)
+                    barcode_values = batch_result[0] if batch_result[0] else []
+                    quantity_values = batch_result[1] if batch_result[1] else []
                 except Exception as e:
                     self.logger.error(f"Ошибка получения данных в диапазоне {barcode_range}-{quantity_range} листа '{self.current_worksheet.title}': {str(e)}")
                     break
@@ -172,10 +207,8 @@ class GoogleSheetsParser:
     def _parse_sheet_data(self, sheet_name: str) -> SheetsData:
         self._set_worksheet(sheet_name)
             
-        warehouses = self.parse_warehouses()
-        start_date, end_date = self.parse_dates()
+        warehouses, start_date, end_date, max_coefficient = self.parse_metadata()
         products = self.parse_products()
-        max_coefficient = self.parse_max_coefficient()
         
         return SheetsData(
             warehouses=warehouses,
