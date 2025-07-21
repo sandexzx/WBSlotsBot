@@ -320,7 +320,9 @@ class WBSlotsMonitor:
             sheets_count = len(self.parsed_data['sheets'])
             total_products = sum(len(sheet.get('products', [])) for sheet in self.parsed_data['sheets'].values())
             
+            google_requests = self.parsed_data.get('google_api_requests', 0)
             print(f"✅ Парсинг завершен за {parse_time:.2f}с. Найдено листов: {sheets_count}, товаров: {total_products}")
+            print(f"📊 Google Sheets API запросов: {google_requests} (лимит: 60/мин)")
             print(f"🚀 Оптимизация: Будет выполнено ровно 3 API запроса (склады + коэффициенты + все товары)")
             print(f"📦 Все {total_products} товаров будут отправлены одним POST запросом")
             

@@ -32,6 +32,7 @@ class GoogleSheetsParser:
         self.client = None
         self.spreadsheet = None
         self.current_worksheet = None
+        self.api_requests_count = 0  # Счетчик API запросов
         self._setup_logger()
         
     def _setup_logger(self):
@@ -62,7 +63,7 @@ class GoogleSheetsParser:
             creds = Credentials.from_service_account_file(self.credentials_file, scopes=scope)
             self.client = gspread.authorize(creds)
         except Exception as e:
-            self.logger.error(f"Ошибка аутентификации: {str(e)}")
+            self.logger.error(f"Ошибка аутентификации: {str(e)} | API запросов выполнено: {self.api_requests_count}")
             raise
         
     def connect_to_spreadsheet(self) -> None:
@@ -73,7 +74,7 @@ class GoogleSheetsParser:
             spreadsheet_id = self._extract_spreadsheet_id(self.spreadsheet_url)
             self.spreadsheet = self.client.open_by_key(spreadsheet_id)
         except Exception as e:
-            self.logger.error(f"Ошибка подключения к таблице {self.spreadsheet_url}: {str(e)}")
+            self.logger.error(f"Ошибка подключения к таблице {self.spreadsheet_url}: {str(e)} | API запросов выполнено: {self.api_requests_count}")
             raise
         
     def _set_worksheet(self, sheet_name: str) -> None:
@@ -85,10 +86,10 @@ class GoogleSheetsParser:
         except gspread.exceptions.WorksheetNotFound:
             available_sheets = [ws.title for ws in self.spreadsheet.worksheets()]
             error_msg = f"Лист '{sheet_name}' не найден. Доступные листы: {available_sheets}"
-            self.logger.error(error_msg)
+            self.logger.error(error_msg + f" | API запросов выполнено: {self.api_requests_count}")
             raise ValueError(error_msg)
         except Exception as e:
-            self.logger.error(f"Ошибка подключения к листу '{sheet_name}': {str(e)}")
+            self.logger.error(f"Ошибка подключения к листу '{sheet_name}': {str(e)} | API запросов выполнено: {self.api_requests_count}")
             raise
         
     def _extract_spreadsheet_id(self, url: str) -> str:
@@ -100,16 +101,21 @@ class GoogleSheetsParser:
         """Выполняет функцию с exponential backoff при ошибках API"""
         for attempt in range(max_retries):
             try:
-                return func()
+                result = func()
+                self.api_requests_count += 1  # Увеличиваем счетчик при успешном запросе
+                return result
             except Exception as e:
                 if attempt == max_retries - 1:
+                    self.api_requests_count += 1  # Учитываем неудачный запрос тоже
                     raise
                 
                 if "429" in str(e) or "quota" in str(e).lower() or "limit" in str(e).lower():
                     wait_time = (2 ** attempt) + (attempt * 0.1)
                     self.logger.warning(f"API limit hit, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
                     time.sleep(wait_time)
+                    self.api_requests_count += 1  # Учитываем каждую попытку
                 else:
+                    self.api_requests_count += 1  # Учитываем неудачный запрос
                     raise
     
     def parse_metadata(self) -> Tuple[List[str], str, str, float]:
@@ -141,7 +147,7 @@ class GoogleSheetsParser:
             return warehouses, start_date, end_date, max_coefficient
             
         except Exception as e:
-            self.logger.error(f"Ошибка получения метаданных листа '{self.current_worksheet.title}': {str(e)}")
+            self.logger.error(f"Ошибка получения метаданных листа '{self.current_worksheet.title}': {str(e)} | API запросов выполнено: {self.api_requests_count}")
             return [], None, None, 1.0
         
     def parse_products(self) -> List[ProductInfo]:
@@ -164,7 +170,7 @@ class GoogleSheetsParser:
                     barcode_values = batch_result[0] if batch_result[0] else []
                     quantity_values = batch_result[1] if batch_result[1] else []
                 except Exception as e:
-                    self.logger.error(f"Ошибка получения данных в диапазоне {barcode_range}-{quantity_range} листа '{self.current_worksheet.title}': {str(e)}")
+                    self.logger.error(f"Ошибка получения данных в диапазоне {barcode_range}-{quantity_range} листа '{self.current_worksheet.title}': {str(e)} | API запросов выполнено: {self.api_requests_count}")
                     break
                 
                 barcode_list = barcode_values if barcode_values else []
@@ -182,11 +188,11 @@ class GoogleSheetsParser:
                                 quantity = int(quantity_str) if quantity_str else 0
                             except (ValueError, TypeError):
                                 quantity = 0
-                                self.logger.error(f"Некорректное количество '{quantity_str}' для товара '{barcode}' в строке {batch_start + i} листа '{self.current_worksheet.title}'")
+                                self.logger.error(f"Некорректное количество '{quantity_str}' для товара '{barcode}' в строке {batch_start + i} листа '{self.current_worksheet.title}' | API запросов выполнено: {self.api_requests_count}")
                                 
                             products.append(ProductInfo(barcode=barcode.strip(), quantity=quantity))
                     except Exception as e:
-                        self.logger.error(f"Ошибка обработки строки {batch_start + i} листа '{self.current_worksheet.title}': {str(e)}")
+                        self.logger.error(f"Ошибка обработки строки {batch_start + i} листа '{self.current_worksheet.title}': {str(e)} | API запросов выполнено: {self.api_requests_count}")
                         continue
                         
                 if not has_data:
@@ -194,7 +200,7 @@ class GoogleSheetsParser:
                     
                 batch_start = batch_end + 1
         except Exception as e:
-            self.logger.error(f"Критическая ошибка парсинга товаров в листе '{self.current_worksheet.title}': {str(e)}")
+            self.logger.error(f"Критическая ошибка парсинга товаров в листе '{self.current_worksheet.title}': {str(e)} | API запросов выполнено: {self.api_requests_count}")
             
         return products
         
@@ -202,6 +208,7 @@ class GoogleSheetsParser:
         if not self.spreadsheet:
             self.connect_to_spreadsheet()
         
+        self.api_requests_count += 1  # Запрос списка листов
         return [ws.title for ws in self.spreadsheet.worksheets()]
         
     def _parse_sheet_data(self, sheet_name: str) -> SheetsData:
@@ -219,6 +226,7 @@ class GoogleSheetsParser:
         )
         
     def parse_all_sheets(self) -> Dict[str, SheetsData]:
+        self.api_requests_count = 0  # Сбрасываем счетчик в начале парсинга
         available_sheets = self.get_available_sheets()
         results = {}
         
@@ -228,7 +236,7 @@ class GoogleSheetsParser:
                 data = self._parse_sheet_data(sheet_name)
                 results[sheet_name] = data
             except Exception as e:
-                error_msg = f"Ошибка при парсинге листа '{sheet_name}': {e}"
+                error_msg = f"Ошибка при парсинге листа '{sheet_name}': {e} | API запросов выполнено: {self.api_requests_count}"
                 print(error_msg)
                 self.logger.error(error_msg)
                 
@@ -238,7 +246,8 @@ class GoogleSheetsParser:
         result = {
             'sheets': {},
             'parsed_at': datetime.now().isoformat(),
-            'total_sheets': len(all_sheets_data)
+            'total_sheets': len(all_sheets_data),
+            'google_api_requests': self.api_requests_count  # Добавляем количество запросов
         }
         
         for sheet_name, sheet_data in all_sheets_data.items():
