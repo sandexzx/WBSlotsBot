@@ -447,6 +447,12 @@ class TelegramNotifier:
             return
         
         message = self.format_monitoring_message(parsed_data, monitoring_results)
+        
+        # Фильтруем сообщения об ошибках мониторинга
+        if message.startswith("❌ Ошибка мониторинга:"):
+            logger.info("Сообщение об ошибке мониторинга не отправляется пользователям")
+            return
+        
         new_message_hash = self.calculate_message_hash(message)
         
         # Отправляем сообщение только тем, у кого хеш отличается
